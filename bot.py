@@ -1,22 +1,27 @@
+import os
+import json
+from dotenv import load_dotenv
+load_dotenv()
+
 import discord
 from discord.ext import commands
 import firebase_admin
 from firebase_admin import credentials, firestore
 from datetime import datetime
 import matplotlib.pyplot as plt
-import os
+
 
 # Discord setup
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix='!', intents=intents)
+bot = commands.Bot(command_prefix='.', intents=intents)
 
 # Firebase setup
 cred = credentials.Certificate("firebase_key.json")
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-def estimate_calories(exercise, sets, reps, weight, body_weight=155):
+def estimate_calories(exercise, sets, reps, weight, body_weight=160):
     met_table = {
         "squat": 6.0, "bench": 3.5, "deadlift": 7.0, "pullup": 5.0, "running": 9.8
     }
@@ -78,13 +83,71 @@ async def workout_history(ctx):
     doc = db.collection("workouts").document(user_id).get()
 
     if not doc.exists:
-        await ctx.send("❌ No history found.")
+        await ctx.send("❌ No workout history found.")
         return
 
     entries = doc.to_dict().get("entries", [])
-    last = entries[-5:]
-    response = "\n".join([f"{e['timestamp'][:10]}: {e['exercise']} {e['sets']}x{e['reps']} @ {e['weight']} lbs" for e in last])
-    await ctx.send(f"📚 Last workouts:\n```\n{response}\n```")
+    if not entries:
+        await ctx.send("❌ No workout data.")
+        return
+
+    msg = "\n".join(
+        [f"{i+1}. {e['timestamp'][:10]}: {e['exercise']} {e['sets']}x{e['reps']} @ {e['weight']} lbs"
+         for i, e in enumerate(entries[-10:])]
+    )
+
+    await ctx.send(f"📜 Your last 10 workouts:\n```\n{msg}\n```")
+
+@bot.command(name="delete")
+async def delete_workout(ctx, number: int):
+    user_id = str(ctx.author.id)
+    doc_ref = db.collection("workouts").document(user_id)
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        await ctx.send("❌ No workouts to delete.")
+        return
+
+    entries = doc.to_dict().get("entries", [])
+
+    if number < 1 or number > len(entries):
+        await ctx.send("❌ Invalid number.")
+        return
+
+    removed = entries.pop(number - 1)
+    doc_ref.set({"entries": entries})
+
+    await ctx.send(f"🗑️ Deleted entry #{number}: `{removed['exercise']} {removed['sets']}x{removed['reps']} @ {removed['weight']} lbs`")
+
+@bot.command(name="edit")
+async def edit_workout(ctx, number: int, exercise: str, sets: int, reps: int, weight: int):
+    user_id = str(ctx.author.id)
+    doc_ref = db.collection("workouts").document(user_id)
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        await ctx.send("❌ No workouts to edit.")
+        return
+
+    entries = doc.to_dict().get("entries", [])
+
+    if number < 1 or number > len(entries):
+        await ctx.send("❌ Invalid entry number.")
+        return
+
+    old = entries[number - 1]
+    entries[number - 1] = {
+        "exercise": exercise,
+        "sets": sets,
+        "reps": reps,
+        "weight": weight,
+        "calories": estimate_calories(exercise, sets, reps, weight),
+        "timestamp": old["timestamp"]  # keep original timestamp
+    }
+
+    doc_ref.set({"entries": entries})
+    await ctx.send(f"✅ Updated entry #{number}: `{exercise} {sets}x{reps} @ {weight} lbs`")
+
 
 @bot.command(name="compare")
 async def compare_last(ctx, exercise: str):
@@ -113,5 +176,26 @@ async def show_graph(ctx, exercise: str):
         os.remove(path)
     else:
         await ctx.send("❌ No data to plot.")
+print("TOKEN:", os.getenv("DISCORD_TOKEN"))
+
+@bot.command(name="undo")
+async def undo_last(ctx):
+    user_id = str(ctx.author.id)
+    doc_ref = db.collection("workouts").document(user_id)
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        await ctx.send("❌ No workouts to undo.")
+        return
+
+    entries = doc.to_dict().get("entries", [])
+    if not entries:
+        await ctx.send("❌ Your log is empty.")
+        return
+
+    removed = entries.pop()
+    doc_ref.set({"entries": entries})
+    await ctx.send(f"↩️ Undid last workout: `{removed['exercise']} {removed['sets']}x{removed['reps']} @ {removed['weight']} lbs`")
+
 
 bot.run(os.getenv("DISCORD_TOKEN"))
